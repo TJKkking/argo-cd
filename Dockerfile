@@ -1,4 +1,5 @@
-ARG BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/ubuntu:24.04@sha256:80dd3c3b9c6cecb9f1667e9290b3bc61b78c2678c02cbdae5f0fea92cc6734ab
+# ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:80dd3c3b9c6cecb9f1667e9290b3bc61b78c2678c02cbdae5f0fea92cc6734ab
+ARG BASE_IMAGE=yum.tbsite.net/mirrors/ubuntu:24.04
 ####################################################################################################
 # Builder image
 # Initial stage which pulls prepares build dependencies and CLI tooling we need for our final image
