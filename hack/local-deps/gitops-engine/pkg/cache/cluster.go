@@ -562,6 +562,8 @@ func (c *clusterCache) startMissingWatches() error {
 						return nil
 					}
 				}
+
+				c.log.Info("[POC] startMissingWatches called, watchEvents will be called, resourceVersion: ", resourceVersion)
 				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 				return nil
 			})
@@ -583,7 +585,7 @@ func runSynced(lock sync.Locker, action func() error) error {
 // listResources creates list pager and enforces number of concurrent list requests
 // The callback should not wait on any locks that may be held by other callers.
 func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.ResourceInterface, callback func(*pager.ListPager) error) (string, error) {
-	c.log.Info("[POC] listResources called")
+	c.log.Info("[POC] listResources callback called")
 	if err := c.listSemaphore.Acquire(ctx, 1); err != nil {
 		return "", err
 	}
@@ -592,7 +594,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 	var retryCount int64
 	resourceVersion := ""
 	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-		c.log.Info("[POC] listPager called")
+		c.log.Info("[POC] listResources callback called, listPager called")
 		var res *unstructured.UnstructuredList
 		var listRetry wait.Backoff
 
@@ -604,19 +606,22 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 
 		listRetry.Steps = int(c.listRetryLimit)
 		err := retry.OnError(listRetry, c.listRetryFunc, func() error {
-			c.log.Info("[POC] listRetry called")
+			c.log.Info("[POC] listResource callback called, listRetry called")
 			var ierr error
 			res, ierr = resClient.List(ctx, opts)
+			c.log.Info("[POC] resClient.List(ctx, opts) called, res: ", res)
 			if ierr != nil {
+				c.log.Info("[POC] resClient.List(ctx, opts) failed, ierr: ", ierr)
 				// Log out a retry
 				if c.listRetryLimit > 1 && c.listRetryFunc(ierr) {
 					retryCount++
-					c.log.Info(fmt.Sprintf("Error while listing resources: %v (try %d/%d)", ierr, retryCount, c.listRetryLimit))
+					c.log.Info(fmt.Sprintf("[POC] Error while listing resources: %v (try %d/%d)", ierr, retryCount, c.listRetryLimit))
 				}
 				return ierr
 			}
-			c.log.Info("[POC] listRetry success")
+			c.log.Info("[POC] listResource callback called, listRetry success")
 			resourceVersion = res.GetResourceVersion()
+			c.log.Info("[POC] listResource callback called, listRetry success, resourceVersion: ", resourceVersion)
 			return nil
 		})
 		return res, err
@@ -624,6 +629,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 	listPager.PageBufferSize = c.listPageBufferSize
 	listPager.PageSize = c.listPageSize
 
+	c.log.Info("[POC] Before listResources return, resourceVersion: ", resourceVersion)
 	return resourceVersion, callback(listPager)
 }
 
@@ -641,7 +647,7 @@ func (c *clusterCache) loadInitialState(ctx context.Context, api kube.APIResourc
 		})
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
+		return "", fmt.Errorf("failed to load initial state of resource on loadInitialState %s: %w", api.GroupKind.String(), err)
 	}
 
 	if lock {
@@ -656,7 +662,7 @@ func (c *clusterCache) loadInitialState(ctx context.Context, api kube.APIResourc
 
 func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo, resClient dynamic.ResourceInterface, ns string, resourceVersion string) {
 	kube.RetryUntilSucceed(ctx, watchResourcesRetryTimeout, fmt.Sprintf("watch %s on %s", api.GroupKind, c.config.Host), c.log, func() (err error) {
-		c.log.Info("[POC] watchEvents called, retryUntilSucceed called")
+		c.log.Info("[POC] watchEvents called, retryUntilSucceed called, resourceVersion: ", resourceVersion)
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("recovered from panic: %+v\n%s", r, debug.Stack())
@@ -665,13 +671,16 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 
 		// load API initial state if no resource version provided
 		if resourceVersion == "" {
+			c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState will be called")
 			resourceVersion, err = c.loadInitialState(ctx, api, resClient, ns, true)
+			c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState called, resourceVersion: ", resourceVersion)
 			if err != nil {
-				c.log.Info("[POC] failed to load initial state of resource: ", api.GroupKind.String(), err)
+				c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState called, failed to load initial state of resource on watchEvents: ", api.GroupKind.String(), err)
 				return err
 			}
 		}
 
+		c.log.Info("[POC] Before NewRetryWatcher, resourceVersion: ", resourceVersion)
 		w, err := watchutil.NewRetryWatcher(resourceVersion, &cache.ListWatch{
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				c.log.Info("[POC] WatchFunc called")
@@ -963,7 +972,7 @@ func (c *clusterCache) sync() error {
 				})
 			})
 			if err != nil {
-				c.log.Info("[POC] Failed to load initial state of resource: ", api.GroupKind.String(), err)
+				c.log.Info("[POC] Failed to load initial state of resource on listResources: ", api.GroupKind.String(), err)
 				if c.isRestrictedResource(err) {
 					keep := false
 					if c.respectRBAC == RespectRbacStrict {
@@ -982,9 +991,9 @@ func (c *clusterCache) sync() error {
 						return nil
 					}
 				}
-				return fmt.Errorf("failed to load initial state of resource %s: %w", api.GroupKind.String(), err)
+				return fmt.Errorf("failed to load initial state of resource on processApi %s: %w", api.GroupKind.String(), err)
 			}
-			c.log.Info("[POC] Before watchEvents, resource version: ", resourceVersion)
+			c.log.Info("[POC] Before watchEvents on processApi, resourceVersion: ", resourceVersion)
 
 			go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 
