@@ -108,6 +108,7 @@ FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.24.4@sha256:db5d0afbfb
 
 WORKDIR /go/src/github.com/argoproj/argo-cd
 
+COPY hack/local-deps/gitops-engine ./hack/local-deps/gitops-engine
 COPY go.* ./
 RUN go mod download
 
