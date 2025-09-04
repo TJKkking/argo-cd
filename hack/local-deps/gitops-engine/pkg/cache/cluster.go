@@ -491,6 +491,7 @@ func runSynced(lock sync.Locker, action func() error) error {
 
 // listResources creates list pager and enforces number of concurrent list requests
 func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.ResourceInterface, callback func(*pager.ListPager) error) (string, error) {
+	c.log.Info("[POC] listResources called")
 	if err := c.listSemaphore.Acquire(ctx, 1); err != nil {
 		return "", err
 	}
@@ -498,6 +499,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 	var retryCount int64 = 0
 	resourceVersion := ""
 	listPager := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+		c.log.Info("[POC] listPager called")
 		var res *unstructured.UnstructuredList
 		var listRetry wait.Backoff
 
@@ -509,6 +511,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 
 		listRetry.Steps = int(c.listRetryLimit)
 		err := retry.OnError(listRetry, c.listRetryFunc, func() error {
+			c.log.Info("[POC] listRetry called")
 			var ierr error
 			res, ierr = resClient.List(ctx, opts)
 			if ierr != nil {
@@ -519,6 +522,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 				}
 				return ierr
 			}
+			c.log.Info("[POC] listRetry success")
 			resourceVersion = res.GetResourceVersion()
 			return nil
 		})
@@ -532,6 +536,7 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 
 func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo, resClient dynamic.ResourceInterface, ns string, resourceVersion string) {
 	kube.RetryUntilSucceed(ctx, watchResourcesRetryTimeout, fmt.Sprintf("watch %s on %s", api.GroupKind, c.config.Host), c.log, func() (err error) {
+		c.log.Info("[POC] watchEvents called, retryUntilSucceed called")
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("Recovered from panic: %+v\n%s", r, debug.Stack())
@@ -540,7 +545,9 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 
 		// load API initial state if no resource version provided
 		if resourceVersion == "" {
+			c.log.Info("[POC] listResources from watchEvents called, resourceVersion is empty")
 			resourceVersion, err = c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
+				c.log.Info("[POC] listResources from watchEvents called")
 				var items []*Resource
 				err := listPager.EachListItem(ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
 					if un, ok := obj.(*unstructured.Unstructured); !ok {
@@ -552,40 +559,48 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 				})
 
 				if err != nil {
+					c.log.Info("[POC] failed to load initial state of resource: ", api.GroupKind.String(), err)
 					return fmt.Errorf("failed to load initial state of resource %s: %v", api.GroupKind.String(), err)
 				}
 
 				return runSynced(&c.lock, func() error {
+					c.log.Info("[POC] replaceResourceCache called")
 					c.replaceResourceCache(api.GroupKind, items, ns)
 					return nil
 				})
 			})
 
 			if err != nil {
+				c.log.Info("[POC] failed to load initial state of resource: ", api.GroupKind.String(), err)
 				return err
 			}
 		}
 
 		w, err := watchutil.NewRetryWatcher(resourceVersion, &cache.ListWatch{
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				c.log.Info("[POC] WatchFunc called")
 				res, err := resClient.Watch(ctx, options)
 				if errors.IsNotFound(err) {
+					c.log.Info("[POC] WatchFunc called, errors.IsNotFound")
 					c.stopWatching(api.GroupKind, ns)
 				}
 				return res, err
 			},
 		})
 		if err != nil {
+			c.log.Info("[POC] failed to create retry watcher: ", api.GroupKind.String(), err)
 			return err
 		}
 
 		defer func() {
+			c.log.Info("[POC] WatchFunc called, defer called")
 			w.Stop()
 			resourceVersion = ""
 		}()
 
 		var watchResyncTimeoutCh <-chan time.Time
 		if c.watchResyncTimeout > 0 {
+			c.log.Info("[POC] WatchFunc called, watchResyncTimeout > 0")
 			shouldResync := time.NewTimer(c.watchResyncTimeout)
 			defer shouldResync.Stop()
 			watchResyncTimeoutCh = shouldResync.C
@@ -595,6 +610,7 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 			select {
 			// stop watching when parent context got cancelled
 			case <-ctx.Done():
+				c.log.Info("[POC] WatchFunc called, ctx.Done")
 				return nil
 
 			// re-synchronize API state and restart watch periodically
@@ -704,6 +720,7 @@ func (c *clusterCache) processApi(client dynamic.Interface, api kube.APIResource
 
 func (c *clusterCache) sync() error {
 	c.log.Info("Start syncing cluster")
+	c.log.Info("[POC] Cluster name: ", c.config.Host)
 
 	for i := range c.apisMeta {
 		c.apisMeta[i].watchCancel()
@@ -718,6 +735,7 @@ func (c *clusterCache) sync() error {
 		return err
 	}
 	c.serverVersion = version
+	c.log.Info("[POC] Server version: ", version)
 	apiResources, err := c.kubectl.GetAPIResources(config, false, NewNoopSettings())
 	if err != nil {
 		return err
@@ -759,7 +777,9 @@ func (c *clusterCache) sync() error {
 		c.namespacedResources[api.GroupKind] = api.Meta.Namespaced
 		lock.Unlock()
 
+		c.log.Info("[POC] Before processing API: ", api.GroupKind.String())
 		return c.processApi(client, api, func(resClient dynamic.ResourceInterface, ns string) error {
+			c.log.Info("[POC] Processing API: ", api.GroupKind.String())
 			resourceVersion, err := c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
 				return listPager.EachListItem(context.Background(), metav1.ListOptions{}, func(obj runtime.Object) error {
 					if un, ok := obj.(*unstructured.Unstructured); !ok {
@@ -773,8 +793,10 @@ func (c *clusterCache) sync() error {
 				})
 			})
 			if err != nil {
+				c.log.Info("[POC] Failed to load initial state of resource: ", api.GroupKind.String(), err)
 				return fmt.Errorf("failed to load initial state of resource %s: %v", api.GroupKind.String(), err)
 			}
+			c.log.Info("[POC] Before watchEvents, resource version: ", resourceVersion)
 
 			go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 
@@ -792,6 +814,7 @@ func (c *clusterCache) sync() error {
 
 // EnsureSynced checks cache state and synchronizes it if necessary
 func (c *clusterCache) EnsureSynced() error {
+	c.log.Info("[POC] EnsureSynced called")
 	syncStatus := &c.syncStatus
 
 	// first check if cluster is synced *without acquiring the full clusterCache lock*
@@ -813,10 +836,12 @@ func (c *clusterCache) EnsureSynced() error {
 	if syncStatus.synced(c.clusterSyncRetryTimeout) {
 		return syncStatus.syncError
 	}
+	c.log.Info("EnsureSynced called, sync called")
 	err := c.sync()
 	syncTime := time.Now()
 	syncStatus.syncTime = &syncTime
 	syncStatus.syncError = err
+	c.log.Info("EnsureSynced called, sync called, syncStatus.syncError: ", syncStatus.syncError)
 	return syncStatus.syncError
 }
 
@@ -911,12 +936,15 @@ func (c *clusterCache) managesNamespace(namespace string) bool {
 // The function returns all resources from cache for those `isManaged` function returns true and resources
 // specified in targetObjs list.
 func (c *clusterCache) GetManagedLiveObjs(targetObjs []*unstructured.Unstructured, isManaged func(r *Resource) bool) (map[kube.ResourceKey]*unstructured.Unstructured, error) {
+	c.log.Info("[POC] GetManagedLiveObjs called")
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
 	for _, o := range targetObjs {
+		c.log.Info("[POC] GetManagedLiveObjs called, o: ", o.GetKind(), o.GetName())
 		if len(c.namespaces) > 0 {
 			if o.GetNamespace() == "" && !c.clusterResources {
+				c.log.Info("[POC] GetManagedLiveObjs called, Cluster level %s %q can not be managed when in namespaced mode", o.GetKind(), o.GetName())
 				return nil, fmt.Errorf("Cluster level %s %q can not be managed when in namespaced mode", o.GetKind(), o.GetName())
 			} else if o.GetNamespace() != "" && !c.managesNamespace(o.GetNamespace()) {
 				return nil, fmt.Errorf("Namespace %q for %s %q is not managed", o.GetNamespace(), o.GetKind(), o.GetName())
@@ -934,6 +962,7 @@ func (c *clusterCache) GetManagedLiveObjs(targetObjs []*unstructured.Unstructure
 	// but are simply missing our label
 	lock := &sync.Mutex{}
 	err := kube.RunAllAsync(len(targetObjs), func(i int) error {
+		c.log.Info("[POC] GetManagedLiveObjs called, RunAllAsync called")
 		targetObj := targetObjs[i]
 		key := kube.GetResourceKey(targetObj)
 		lock.Lock()
@@ -941,6 +970,7 @@ func (c *clusterCache) GetManagedLiveObjs(targetObjs []*unstructured.Unstructure
 		lock.Unlock()
 
 		if managedObj == nil {
+			c.log.Info("[POC] GetManagedLiveObjs called, managedObj is nil")
 			if existingObj, exists := c.resources[key]; exists {
 				if existingObj.Resource != nil {
 					managedObj = existingObj.Resource
@@ -955,6 +985,7 @@ func (c *clusterCache) GetManagedLiveObjs(targetObjs []*unstructured.Unstructure
 					}
 				}
 			} else if _, watched := c.apisMeta[key.GroupKind()]; !watched {
+				c.log.Info("[POC] GetManagedLiveObjs called, watched is false")
 				var err error
 				managedObj, err = c.kubectl.GetResource(context.TODO(), c.config, targetObj.GroupVersionKind(), targetObj.GetName(), targetObj.GetNamespace())
 				if err != nil {
