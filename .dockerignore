@@ -23,6 +23,7 @@ examples/
 !test/fixture
 !test/remote
 !hack/installers
+!hack/local-deps
 !hack/gpg-wrapper.sh
 !hack/git-verify-wrapper.sh
 !hack/tool-versions.sh
