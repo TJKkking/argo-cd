@@ -864,12 +864,14 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 		}
 		found := false
 		for _, n := range append(tree.Nodes, tree.OrphanedNodes...) {
+			log.Infof("POC Checking resource: %s, %s, %s", n.ResourceRef.UID, n.ResourceRef.Name, n.ResourceRef.Namespace)
 			if n.ResourceRef.UID == q.GetResourceUID() && n.ResourceRef.Name == q.GetResourceName() && n.ResourceRef.Namespace == q.GetResourceNamespace() {
 				found = true
 				break
 			}
 		}
 		if !found {
+			log.Infof("POC Resource not found: %s, %s, %s", q.GetResourceUID(), q.GetResourceName(), q.GetResourceNamespace())
 			return nil, status.Errorf(codes.InvalidArgument, "%s not found as part of application %s", q.GetResourceName(), q.GetName())
 		}
 
@@ -889,12 +891,13 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 			"involvedObject.namespace": namespace,
 		}).String()
 	}
-	log.Infof("Querying for resource events with field selector: %s", fieldSelector)
+	log.Infof("POC Querying for resource events with field selector: %s", fieldSelector)
 	opts := metav1.ListOptions{FieldSelector: fieldSelector}
 	list, err := kubeClientset.CoreV1().Events(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("error listing resource events: %w", err)
 	}
+	log.Infof("POC Resource events listed: %d", len(list.Items))
 	return list.DeepCopy(), nil
 }
 
