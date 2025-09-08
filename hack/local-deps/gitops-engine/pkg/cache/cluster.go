@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"sort"
@@ -563,7 +564,7 @@ func (c *clusterCache) startMissingWatches() error {
 					}
 				}
 
-				c.log.Info("[POC] startMissingWatches called, watchEvents will be called, resourceVersion: ", resourceVersion)
+				c.log.Info("[POC] startMissingWatches called, watchEvents will be called", "resourceType", api.GroupKind.String(), "resourceVersion", resourceVersion)
 				go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 				return nil
 			})
@@ -584,7 +585,7 @@ func runSynced(lock sync.Locker, action func() error) error {
 
 // listResources creates list pager and enforces number of concurrent list requests
 // The callback should not wait on any locks that may be held by other callers.
-func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.ResourceInterface, callback func(*pager.ListPager) error) (string, error) {
+func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.ResourceInterface, resourceType string, callback func(*pager.ListPager) error) (string, error) {
 	c.log.Info("[POC] listResources callback called")
 	if err := c.listSemaphore.Acquire(ctx, 1); err != nil {
 		return "", err
@@ -609,19 +610,25 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 			c.log.Info("[POC] listResource callback called, listRetry called")
 			var ierr error
 			res, ierr = resClient.List(ctx, opts)
-			c.log.Info("[POC] resClient.List(ctx, opts) called, res: ", res)
+			data, _ := json.Marshal(res)
+			c.log.Info("[POC] resClient.List called", "detail", string(data))
 			if ierr != nil {
-				c.log.Info("[POC] resClient.List(ctx, opts) failed, ierr: ", ierr)
+				c.log.Info("[POC] resClient.List failed", "error", ierr.Error())
 				// Log out a retry
 				if c.listRetryLimit > 1 && c.listRetryFunc(ierr) {
 					retryCount++
-					c.log.Info(fmt.Sprintf("[POC] Error while listing resources: %v (try %d/%d)", ierr, retryCount, c.listRetryLimit))
+					c.log.Info(
+						"[POC] Error while listing resources",
+						"err", ierr.Error(),
+						"retryCount", retryCount,
+						"retryLimit", c.listRetryLimit,
+					)
 				}
 				return ierr
 			}
-			c.log.Info("[POC] listResource callback called, listRetry success")
+			c.log.Info("[POC] listResource callback called, listRetry success, Before get resourceVersion")
 			resourceVersion = res.GetResourceVersion()
-			c.log.Info("[POC] listResource callback called, listRetry success, resourceVersion: ", resourceVersion)
+			c.log.Info("[POC] listResource callback called, listRetry success", "resourceType", resourceType, "resourceVersion", resourceVersion)
 			return nil
 		})
 		return res, err
@@ -629,14 +636,14 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 	listPager.PageBufferSize = c.listPageBufferSize
 	listPager.PageSize = c.listPageSize
 
-	c.log.Info("[POC] Before listResources return, resourceVersion: ", resourceVersion)
+	c.log.Info("[POC] Before listResources return", "resourceType", resourceType, "resourceVersion", resourceVersion)
 	return resourceVersion, callback(listPager)
 }
 
 // loadInitialState loads the state of all the resources retrieved by the given resource client.
 func (c *clusterCache) loadInitialState(ctx context.Context, api kube.APIResourceInfo, resClient dynamic.ResourceInterface, ns string, lock bool) (string, error) {
 	var items []*Resource
-	resourceVersion, err := c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
+	resourceVersion, err := c.listResources(ctx, resClient, api.GroupKind.String(), func(listPager *pager.ListPager) error {
 		return listPager.EachListItem(ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
 			if un, ok := obj.(*unstructured.Unstructured); !ok {
 				return fmt.Errorf("object %s/%s has an unexpected type", un.GroupVersionKind().String(), un.GetName())
@@ -662,7 +669,7 @@ func (c *clusterCache) loadInitialState(ctx context.Context, api kube.APIResourc
 
 func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo, resClient dynamic.ResourceInterface, ns string, resourceVersion string) {
 	kube.RetryUntilSucceed(ctx, watchResourcesRetryTimeout, fmt.Sprintf("watch %s on %s", api.GroupKind, c.config.Host), c.log, func() (err error) {
-		c.log.Info("[POC] watchEvents called, retryUntilSucceed called, resourceVersion: ", resourceVersion)
+		c.log.Info("[POC] watchEvents called, retryUntilSucceed called", "resourceType", api.GroupKind.String(), "resourceVersion", resourceVersion)
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("recovered from panic: %+v\n%s", r, debug.Stack())
@@ -673,14 +680,14 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 		if resourceVersion == "" {
 			c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState will be called")
 			resourceVersion, err = c.loadInitialState(ctx, api, resClient, ns, true)
-			c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState called, resourceVersion: ", resourceVersion)
+			c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState called", "resourceType", api.GroupKind.String(), "resourceVersion", resourceVersion)
 			if err != nil {
 				c.log.Info("[POC] watchEvents called, resourceVersion is empty, loadInitialState called, failed to load initial state of resource on watchEvents: ", api.GroupKind.String(), err)
 				return err
 			}
 		}
 
-		c.log.Info("[POC] Before NewRetryWatcher, resourceVersion: ", resourceVersion)
+		c.log.Info("[POC] Before NewRetryWatcher", "resourceType", api.GroupKind.String(), "resourceVersion", resourceVersion)
 		w, err := watchutil.NewRetryWatcher(resourceVersion, &cache.ListWatch{
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				c.log.Info("[POC] WatchFunc called")
@@ -807,13 +814,16 @@ func (c *clusterCache) watchEvents(ctx context.Context, api kube.APIResourceInfo
 // call the callback. If we're managing the whole cluster, we call the callback with the client and an empty namespace.
 // If we're managing specific namespaces, we call the callback for each namespace.
 func (c *clusterCache) processApi(client dynamic.Interface, api kube.APIResourceInfo, callback func(resClient dynamic.ResourceInterface, ns string) error) error {
+	c.log.Info("[POC] processApi called", "api", api.GroupVersionResource.String())
 	resClient := client.Resource(api.GroupVersionResource)
 	switch {
 	// if manage whole cluster or resource is cluster level and cluster resources enabled
 	case len(c.namespaces) == 0 || (!api.Meta.Namespaced && c.clusterResources):
+		c.log.Info("[POC] processApi called, manage whole cluster or resource is cluster level and cluster resources enabled")
 		return callback(resClient, "")
 	// if manage some namespaces and resource is namespaced
 	case len(c.namespaces) != 0 && api.Meta.Namespaced:
+		c.log.Info("[POC] processApi called, manage some namespaces and resource is namespaced", "namespaces", c.namespaces)
 		for _, ns := range c.namespaces {
 			err := callback(resClient.Namespace(ns), ns)
 			if err != nil {
@@ -845,6 +855,7 @@ func (c *clusterCache) checkPermission(ctx context.Context, reviewInterface auth
 	switch {
 	// if manage whole cluster or resource is cluster level and cluster resources enabled
 	case len(c.namespaces) == 0 || (!api.Meta.Namespaced && c.clusterResources):
+		c.log.Info("[POC] checkPermission called, manage whole cluster or resource is cluster level and cluster resources enabled")
 		resp, err := reviewInterface.Create(ctx, sar, metav1.CreateOptions{})
 		if err != nil {
 			return false, err
@@ -958,7 +969,7 @@ func (c *clusterCache) sync() error {
 		c.log.Info("[POC] Before processing API: ", api.GroupKind.String())
 		return c.processApi(client, api, func(resClient dynamic.ResourceInterface, ns string) error {
 			c.log.Info("[POC] Processing API: ", api.GroupKind.String())
-			resourceVersion, err := c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
+			resourceVersion, err := c.listResources(ctx, resClient, api.GroupKind.String(), func(listPager *pager.ListPager) error {
 				return listPager.EachListItem(context.Background(), metav1.ListOptions{}, func(obj runtime.Object) error {
 					if un, ok := obj.(*unstructured.Unstructured); !ok {
 						return fmt.Errorf("object %s/%s has an unexpected type", un.GroupVersionKind().String(), un.GetName())
@@ -993,7 +1004,7 @@ func (c *clusterCache) sync() error {
 				}
 				return fmt.Errorf("failed to load initial state of resource on processApi %s: %w", api.GroupKind.String(), err)
 			}
-			c.log.Info("[POC] Before watchEvents on processApi, resourceVersion: ", resourceVersion)
+			c.log.Info("[POC] Before watchEvents on processApi", "resourceType", api.GroupKind.String(), "resourceVersion", resourceVersion)
 
 			go c.watchEvents(ctx, api, resClient, ns, resourceVersion)
 
