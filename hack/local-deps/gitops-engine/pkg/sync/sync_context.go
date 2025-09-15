@@ -1129,6 +1129,7 @@ func (sc *syncContext) applyObject(t *syncTask, dryRun, validate bool) (common.R
 		}
 	} else {
 		sc.log.Info("[POC] applyObject: Using apply strategy")
+		// 最终定位到这个方法
 		message, err = sc.resourceOps.ApplyResource(context.TODO(), t.targetObj, dryRunStrategy, force, validate, serverSideApply, sc.serverSideApplyManager)
 	}
 	if err != nil {
@@ -1399,6 +1400,7 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 		// Only wait if the type of the next task is different than the previous type
 		if len(tasksGroup) > 0 && tasksGroup[0].targetObj.GetKind() != task.kind() {
 			state = sc.processCreateTasks(state, tasksGroup, dryRun)
+			sc.log.Info("[POC] runTasks: Processed create tasks", "taskCount", len(tasksGroup), "finalState", state)
 			tasksGroup = syncTasks{task}
 		} else {
 			tasksGroup = append(tasksGroup, task)
@@ -1406,6 +1408,7 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 	}
 	if len(tasksGroup) > 0 {
 		state = sc.processCreateTasks(state, tasksGroup, dryRun)
+		sc.log.Info("[POC] runTasks: Processed create tasks", "taskCount", len(tasksGroup), "finalState", state)
 	}
 	sc.log.Info("[POC] runTasks: Task execution completed", "finalState", state)
 	return state

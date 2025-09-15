@@ -112,41 +112,65 @@ func createManifestFile(obj *unstructured.Unstructured, log logr.Logger) (*os.Fi
 }
 
 func (k *kubectlResourceOperations) runResourceCommand(ctx context.Context, obj *unstructured.Unstructured, dryRunStrategy cmdutil.DryRunStrategy, executor commandExecutor) (string, error) {
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Starting resource command for %s/%s", obj.GetKind(), obj.GetName()))
+
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Creating manifest file for %s/%s", obj.GetKind(), obj.GetName()))
 	manifestFile, err := createManifestFile(obj, k.log)
 	if err != nil {
+		k.log.Error(err, fmt.Sprintf("[AD POC] runResourceCommand: Failed to create manifest file for %s/%s", obj.GetKind(), obj.GetName()))
 		return "", err
 	}
 	defer io.DeleteFile(manifestFile.Name())
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Manifest file created: %s for %s/%s", manifestFile.Name(), obj.GetKind(), obj.GetName()))
 
 	var out []string
 	// rbac resouces are first applied with auth reconcile kubectl feature.
 	if obj.GetAPIVersion() == "rbac.authorization.k8s.io/v1" {
+		k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Running RBAC reconcile for %s/%s", obj.GetKind(), obj.GetName()))
 		outReconcile, err := k.rbacReconcile(ctx, obj, manifestFile.Name(), dryRunStrategy)
 		if err != nil {
+			k.log.Error(err, fmt.Sprintf("[AD POC] runResourceCommand: RBAC reconcile failed for %s/%s", obj.GetKind(), obj.GetName()))
 			return "", fmt.Errorf("error running rbacReconcile: %w", err)
 		}
 		out = append(out, outReconcile)
+		k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: RBAC reconcile successful for %s/%s", obj.GetKind(), obj.GetName()))
 		// We still want to fallthrough and run `kubectl apply` in order set the
 		// last-applied-configuration annotation in the object.
 	}
 
 	// Run kubectl apply
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Setting up IO streams for kubectl execution on %s/%s", obj.GetKind(), obj.GetName()))
 	ioStreams := genericclioptions.IOStreams{
 		In:     &bytes.Buffer{},
 		Out:    &bytes.Buffer{},
 		ErrOut: &bytes.Buffer{},
 	}
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Executing kubectl command for %s/%s", obj.GetKind(), obj.GetName()))
 	err = executor(ioStreams, manifestFile.Name())
 	if err != nil {
-		return "", errors.New(cleanKubectlOutput(err.Error()))
+		errorOutput := cleanKubectlOutput(err.Error())
+		stdout := strings.TrimSpace(ioStreams.Out.(*bytes.Buffer).String())
+		stderr := strings.TrimSpace(ioStreams.ErrOut.(*bytes.Buffer).String())
+		k.log.Error(err, fmt.Sprintf("[AD POC] runResourceCommand: kubectl execution failed for %s/%s", obj.GetKind(), obj.GetName()),
+			"rawError", err.Error(),
+			"cleanedError", errorOutput,
+			"stdout", stdout,
+			"stderr", stderr,
+			"manifestFile", manifestFile.Name())
+		return "", errors.New(errorOutput)
 	}
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: kubectl execution successful for %s/%s", obj.GetKind(), obj.GetName()))
 	if buf := strings.TrimSpace(ioStreams.Out.(*bytes.Buffer).String()); len(buf) > 0 {
+		k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: kubectl stdout for %s/%s: %s", obj.GetKind(), obj.GetName(), buf))
 		out = append(out, buf)
 	}
 	if buf := strings.TrimSpace(ioStreams.ErrOut.(*bytes.Buffer).String()); len(buf) > 0 {
+		k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: kubectl stderr for %s/%s: %s", obj.GetKind(), obj.GetName(), buf))
 		out = append(out, buf)
 	}
-	return strings.Join(out, ". "), nil
+	result := strings.Join(out, ". ")
+	k.log.Info(fmt.Sprintf("[AD POC] runResourceCommand: Command completed successfully for %s/%s, result: %s", obj.GetKind(), obj.GetName(), result))
+	return result, nil
 }
 
 func (k *kubectlServerSideDiffDryRunApplier) runResourceCommand(obj *unstructured.Unstructured, executor commandExecutor) (string, error) {
@@ -328,6 +352,8 @@ func (k *kubectlServerSideDiffDryRunApplier) ApplyResource(_ context.Context, ob
 
 // ApplyResource performs an apply of a unstructured resource
 func (k *kubectlResourceOperations) ApplyResource(ctx context.Context, obj *unstructured.Unstructured, dryRunStrategy cmdutil.DryRunStrategy, force, validate, serverSideApply bool, manager string) (string, error) {
+	k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Starting to apply resource %s/%s in namespace %s", obj.GetKind(), obj.GetName(), obj.GetNamespace()))
+
 	span := k.tracer.StartSpan("ApplyResource")
 	span.SetBaggageItem("kind", obj.GetKind())
 	span.SetBaggageItem("name", obj.GetName())
@@ -342,19 +368,36 @@ func (k *kubectlResourceOperations) ApplyResource(ctx context.Context, obj *unst
 		"serverSideApply", serverSideApply,
 		"serverSideDiff", true).Info(fmt.Sprintf("Applying resource %s/%s in cluster: %s, namespace: %s", obj.GetKind(), obj.GetName(), k.config.Host, obj.GetNamespace()))
 
-	return k.runResourceCommand(ctx, obj, dryRunStrategy, func(ioStreams genericclioptions.IOStreams, fileName string) error {
+	k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Calling runResourceCommand for %s/%s", obj.GetKind(), obj.GetName()))
+	result, err := k.runResourceCommand(ctx, obj, dryRunStrategy, func(ioStreams genericclioptions.IOStreams, fileName string) error {
+		k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Processing kubectl run for %s/%s", obj.GetKind(), obj.GetName()))
 		cleanup, err := processKubectlRun(k.onKubectlRun, "apply")
 		if err != nil {
+			k.log.Error(err, fmt.Sprintf("[AD POC] ApplyResource: Failed to process kubectl run for %s/%s", obj.GetKind(), obj.GetName()))
 			return err
 		}
 		defer cleanup()
 
+		k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Creating apply options for %s/%s", obj.GetKind(), obj.GetName()))
 		applyOpts, err := k.newApplyOptions(ioStreams, obj, fileName, validate, force, serverSideApply, dryRunStrategy, manager)
 		if err != nil {
+			k.log.Error(err, fmt.Sprintf("[AD POC] ApplyResource: Failed to create apply options for %s/%s", obj.GetKind(), obj.GetName()))
 			return err
 		}
-		return applyOpts.Run()
+		k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Running kubectl apply for %s/%s", obj.GetKind(), obj.GetName()))
+		err = applyOpts.Run()
+		if err != nil {
+			k.log.Error(err, fmt.Sprintf("[AD POC] ApplyResource: kubectl apply failed for %s/%s", obj.GetKind(), obj.GetName()))
+		}
+		return err
 	})
+
+	if err != nil {
+		k.log.Error(err, fmt.Sprintf("[AD POC] ApplyResource: Failed to apply resource %s/%s", obj.GetKind(), obj.GetName()))
+		return result, err
+	}
+	k.log.Info(fmt.Sprintf("[AD POC] ApplyResource: Successfully applied resource %s/%s, result: %s", obj.GetKind(), obj.GetName(), result))
+	return result, err
 }
 
 func newApplyOptionsCommon(config *rest.Config, fact cmdutil.Factory, ioStreams genericclioptions.IOStreams, obj *unstructured.Unstructured, fileName string, validate bool, force bool, serverSideApply bool, dryRunStrategy cmdutil.DryRunStrategy, manager string) (*apply.ApplyOptions, error) {
