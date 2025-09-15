@@ -405,12 +405,15 @@ func (sc *syncContext) setRunningPhase(tasks []*syncTask, isPendingDeletion bool
 
 // sync has performs the actual apply or hook based sync
 func (sc *syncContext) Sync() {
+	sc.log.Info("[POC] Sync: Starting sync operation")
 	sc.log.WithValues("skipHooks", sc.skipHooks, "started", sc.started()).Info("Syncing")
 	tasks, ok := sc.getSyncTasks()
 	if !ok {
+		sc.log.Info("[POC] Sync: Failed to get sync tasks")
 		sc.setOperationPhase(common.OperationFailed, "one or more synchronization tasks are not valid")
 		return
 	}
+	sc.log.Info("[POC] Sync: Got sync tasks", "taskCount", len(tasks))
 
 	if sc.started() {
 		sc.log.WithValues("tasks", tasks).Info("Tasks")
@@ -427,11 +430,14 @@ func (sc *syncContext) Sync() {
 			dryRunTasks = sc.filterOutOfSyncTasks(tasks)
 		}
 
+		sc.log.Info("[POC] Sync: Starting dry-run validation", "dryRunTaskCount", len(dryRunTasks))
 		sc.log.WithValues("tasks", dryRunTasks).Info("Tasks (dry-run)")
 		if sc.runTasks(dryRunTasks, true) == failed {
+			sc.log.Info("[POC] Sync: Dry-run validation failed")
 			sc.setOperationPhase(common.OperationFailed, "one or more objects failed to apply (dry run)")
 			return
 		}
+		sc.log.Info("[POC] Sync: Dry-run validation successful")
 	}
 
 	// update status of any tasks that are running, note that this must exclude pruning tasks
@@ -473,6 +479,7 @@ func (sc *syncContext) Sync() {
 	multiStep := tasks.multiStep()
 	runningTasks := tasks.Filter(func(t *syncTask) bool { return (multiStep || t.isHook()) && t.running() })
 	if runningTasks.Len() > 0 {
+		sc.log.Info("[POC] Sync: Found running tasks, waiting", "runningTaskCount", runningTasks.Len())
 		sc.setRunningPhase(runningTasks, false)
 		return
 	}
@@ -485,6 +492,7 @@ func (sc *syncContext) Sync() {
 		return false
 	})
 	if prunedTasksPendingDelete.Len() > 0 {
+		sc.log.Info("[POC] Sync: Found pruned tasks pending deletion, waiting", "pendingDeleteCount", prunedTasksPendingDelete.Len())
 		sc.setRunningPhase(prunedTasksPendingDelete, true)
 		return
 	}
@@ -514,6 +522,7 @@ func (sc *syncContext) Sync() {
 
 	// if there are any completed but unsuccessful tasks, sync is a failure.
 	if tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() }) {
+		sc.log.Info("[POC] Sync: Found unsuccessful completed tasks, marking sync as failed")
 		sc.deleteHooks(hooksPendingDeletionFailed)
 		sc.setOperationFailed(syncFailTasks, syncFailedTasks, "one or more synchronization tasks completed unsuccessfully")
 		return
@@ -530,6 +539,7 @@ func (sc *syncContext) Sync() {
 	// If no sync tasks were generated (e.g., in case all application manifests have been removed),
 	// the sync operation is successful.
 	if len(tasks) == 0 {
+		sc.log.Info("[POC] Sync: No sync tasks remaining, sync successful")
 		// delete all completed hooks which have appropriate delete policy
 		sc.deleteHooks(hooksPendingDeletionSuccessful)
 		sc.setOperationPhase(common.OperationSucceeded, "successfully synced (no more tasks)")
@@ -546,13 +556,17 @@ func (sc *syncContext) Sync() {
 	// This handles the common case where neither hooks or waves are used and a sync equates to simply an (asynchronous) kubectl apply of manifests, which succeeds immediately.
 	remainingTasks := tasks.Filter(func(t *syncTask) bool { return t.phase != phase || wave != t.wave() || t.isHook() })
 
+	sc.log.Info("[POC] Sync: Processing phase and wave", "phase", phase, "wave", wave, "totalTasks", len(tasks))
 	sc.log.WithValues("phase", phase, "wave", wave, "tasks", tasks, "syncFailTasks", syncFailTasks).V(1).Info("Filtering tasks in correct phase and wave")
 	tasks = tasks.Filter(func(t *syncTask) bool { return t.phase == phase && t.wave() == wave })
+	sc.log.Info("[POC] Sync: Filtered tasks for current phase and wave", "filteredTaskCount", len(tasks))
 
 	sc.setOperationPhase(common.OperationRunning, "one or more tasks are running")
 
+	sc.log.Info("[POC] Sync: Starting wet-run (actual execution)", "taskCount", len(tasks))
 	sc.log.WithValues("tasks", tasks).V(1).Info("Wet-run")
 	runState := sc.runTasks(tasks, false)
+	sc.log.Info("[POC] Sync: Wet-run completed", "runState", runState)
 
 	if sc.syncWaveHook != nil && runState != failed {
 		err := sc.syncWaveHook(phase, wave, finalWave)
@@ -566,18 +580,23 @@ func (sc *syncContext) Sync() {
 
 	switch runState {
 	case failed:
+		sc.log.Info("[POC] Sync: Run state failed")
 		syncFailedTasks, _ := tasks.Split(func(t *syncTask) bool { return t.syncStatus == common.ResultCodeSyncFailed })
 		sc.deleteHooks(hooksPendingDeletionFailed)
 		sc.setOperationFailed(syncFailTasks, syncFailedTasks, "one or more objects failed to apply")
 	case successful:
+		sc.log.Info("[POC] Sync: Run state successful", "remainingTaskCount", remainingTasks.Len())
 		if remainingTasks.Len() == 0 {
+			sc.log.Info("[POC] Sync: All tasks completed successfully")
 			// delete all completed hooks which have appropriate delete policy
 			sc.deleteHooks(hooksPendingDeletionSuccessful)
 			sc.setOperationPhase(common.OperationSucceeded, "successfully synced (all tasks run)")
 		} else {
+			sc.log.Info("[POC] Sync: Setting running phase for remaining tasks")
 			sc.setRunningPhase(remainingTasks, false)
 		}
 	default:
+		sc.log.Info("[POC] Sync: Run state pending")
 		sc.setRunningPhase(tasks.Filter(func(task *syncTask) bool {
 			return task.deleteOnPhaseCompletion()
 		}), true)
@@ -719,9 +738,11 @@ func (sc *syncContext) containsResource(resource reconciledResource) bool {
 
 // generates the list of sync tasks we will be performing during this sync.
 func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
+	sc.log.Info("[POC] getSyncTasks: Starting to generate sync tasks")
 	resourceTasks := syncTasks{}
 	successful = true
 
+	sc.log.Info("[POC] getSyncTasks: Processing resources", "resourceCount", len(sc.resources))
 	for k, resource := range sc.resources {
 		if !sc.containsResource(resource) {
 			sc.log.WithValues("group", k.Group, "kind", k.Kind, "name", k.Name).V(1).Info("Skipping")
@@ -741,9 +762,11 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 		}
 	}
 
+	sc.log.Info("[POC] getSyncTasks: Generated resource tasks", "resourceTaskCount", len(resourceTasks))
 	sc.log.WithValues("resourceTasks", resourceTasks).V(1).Info("Tasks from managed resources")
 
 	hookTasks := syncTasks{}
+	sc.log.Info("[POC] getSyncTasks: Processing hooks", "skipHooks", sc.skipHooks, "hookCount", len(sc.hooks))
 	if !sc.skipHooks {
 		for _, obj := range sc.hooks {
 			for _, phase := range syncPhases(obj) {
@@ -770,6 +793,7 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 		}
 	}
 
+	sc.log.Info("[POC] getSyncTasks: Generated hook tasks", "hookTaskCount", len(hookTasks))
 	sc.log.WithValues("hookTasks", hookTasks).V(1).Info("tasks from hooks")
 
 	tasks := resourceTasks
@@ -792,6 +816,7 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 	}
 
 	if sc.syncNamespace != nil && sc.namespace != "" {
+		sc.log.Info("[POC] getSyncTasks: Auto-creating namespace if needed", "namespace", sc.namespace)
 		tasks = sc.autoCreateNamespace(tasks)
 	}
 
@@ -805,6 +830,7 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 
 	isRetryable := apierrors.IsUnauthorized
 
+	sc.log.Info("[POC] getSyncTasks: Starting permission checks", "totalTasks", len(tasks))
 	serverResCache := make(map[schema.GroupVersionKind]*metav1.APIResource)
 
 	// check permissions
@@ -911,6 +937,7 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 		}
 	}
 
+	sc.log.Info("[POC] getSyncTasks: Sorting tasks")
 	tasks.Sort()
 
 	// finally enrich tasks with the result
@@ -923,6 +950,7 @@ func (sc *syncContext) getSyncTasks() (_ syncTasks, successful bool) {
 		}
 	}
 
+	sc.log.Info("[POC] getSyncTasks: Task generation completed", "totalTasks", len(tasks), "successful", successful)
 	return tasks, successful
 }
 
@@ -1060,6 +1088,7 @@ func (sc *syncContext) shouldUseServerSideApply(targetObj *unstructured.Unstruct
 }
 
 func (sc *syncContext) applyObject(t *syncTask, dryRun, validate bool) (common.ResultCode, string) {
+	sc.log.Info("[POC] applyObject: Starting object application", "kind", t.kind(), "name", t.name(), "namespace", t.namespace(), "dryRun", dryRun, "validate", validate)
 	dryRunStrategy := cmdutil.DryRunNone
 	if dryRun {
 		// irrespective of the dry run mode set in the sync context, always run
@@ -1075,7 +1104,9 @@ func (sc *syncContext) applyObject(t *syncTask, dryRun, validate bool) (common.R
 	shouldReplace := sc.replace || resourceutil.HasAnnotationOption(t.targetObj, common.AnnotationSyncOptions, common.SyncOptionReplace)
 	force := sc.force || resourceutil.HasAnnotationOption(t.targetObj, common.AnnotationSyncOptions, common.SyncOptionForce)
 	serverSideApply := sc.shouldUseServerSideApply(t.targetObj, dryRun)
+	sc.log.Info("[POC] applyObject: Determined apply strategy", "shouldReplace", shouldReplace, "force", force, "serverSideApply", serverSideApply)
 	if shouldReplace {
+		sc.log.Info("[POC] applyObject: Using replace strategy", "hasLiveObj", t.liveObj != nil)
 		if t.liveObj != nil {
 			// Avoid using `kubectl replace` for CRDs since 'replace' might recreate resource and so delete all CRD instances.
 			// The same thing applies for namespaces, which would delete the namespace as well as everything within it,
@@ -1093,16 +1124,21 @@ func (sc *syncContext) applyObject(t *syncTask, dryRun, validate bool) (common.R
 				message, err = sc.resourceOps.ReplaceResource(context.TODO(), t.targetObj, dryRunStrategy, force)
 			}
 		} else {
+			sc.log.Info("[POC] applyObject: Creating resource")
 			message, err = sc.resourceOps.CreateResource(context.TODO(), t.targetObj, dryRunStrategy, validate)
 		}
 	} else {
+		sc.log.Info("[POC] applyObject: Using apply strategy")
 		message, err = sc.resourceOps.ApplyResource(context.TODO(), t.targetObj, dryRunStrategy, force, validate, serverSideApply, sc.serverSideApplyManager)
 	}
 	if err != nil {
+		sc.log.Info("[POC] applyObject: Apply failed", "error", err.Error())
 		return common.ResultCodeSyncFailed, err.Error()
 	}
+	sc.log.Info("[POC] applyObject: Apply successful", "message", message)
 	if kubeutil.IsCRD(t.targetObj) && !dryRun {
 		crdName := t.targetObj.GetName()
+		sc.log.Info("[POC] applyObject: Ensuring CRD readiness", "crdName", crdName)
 		if err = sc.ensureCRDReady(crdName); err != nil {
 			sc.log.Error(err, fmt.Sprintf("failed to ensure that CRD %s is ready", crdName))
 		}
@@ -1112,21 +1148,30 @@ func (sc *syncContext) applyObject(t *syncTask, dryRun, validate bool) (common.R
 
 // pruneObject deletes the object if both prune is true and dryRun is false. Otherwise appropriate message
 func (sc *syncContext) pruneObject(liveObj *unstructured.Unstructured, prune, dryRun bool) (common.ResultCode, string) {
+	sc.log.Info("[POC] pruneObject: Starting prune check", "kind", liveObj.GetKind(), "name", liveObj.GetName(), "namespace", liveObj.GetNamespace(), "prune", prune, "dryRun", dryRun)
 	if !prune {
+		sc.log.Info("[POC] pruneObject: Prune skipped - pruning disabled")
 		return common.ResultCodePruneSkipped, "ignored (requires pruning)"
 	} else if resourceutil.HasAnnotationOption(liveObj, common.AnnotationSyncOptions, common.SyncOptionDisablePrune) {
+		sc.log.Info("[POC] pruneObject: Prune skipped - disabled by annotation")
 		return common.ResultCodePruneSkipped, "ignored (no prune)"
 	}
 	if dryRun {
+		sc.log.Info("[POC] pruneObject: Dry run prune")
 		return common.ResultCodePruned, "pruned (dry run)"
 	}
 	// Skip deletion if object is already marked for deletion, so we don't cause a resource update hotloop
 	deletionTimestamp := liveObj.GetDeletionTimestamp()
 	if deletionTimestamp == nil || deletionTimestamp.IsZero() {
+		sc.log.Info("[POC] pruneObject: Deleting resource")
 		err := sc.kubectl.DeleteResource(context.TODO(), sc.config, liveObj.GroupVersionKind(), liveObj.GetName(), liveObj.GetNamespace(), sc.getDeleteOptions())
 		if err != nil {
+			sc.log.Info("[POC] pruneObject: Deletion failed", "error", err.Error())
 			return common.ResultCodeSyncFailed, err.Error()
 		}
+		sc.log.Info("[POC] pruneObject: Resource deletion initiated")
+	} else {
+		sc.log.Info("[POC] pruneObject: Resource already marked for deletion")
 	}
 	return common.ResultCodePruned, "pruned"
 }
@@ -1251,6 +1296,7 @@ const (
 
 func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 	dryRun = dryRun || sc.dryRun
+	sc.log.Info("[POC] runTasks: Starting task execution", "numTasks", len(tasks), "dryRun", dryRun)
 
 	sc.log.WithValues("numTasks", len(tasks), "dryRun", dryRun).V(1).Info("Running tasks")
 
@@ -1265,8 +1311,10 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 			createTasks = append(createTasks, task)
 		}
 	}
+	sc.log.Info("[POC] runTasks: Separated tasks", "createTaskCount", len(createTasks), "pruneTaskCount", len(pruneTasks))
 	// prune first
 	{
+		sc.log.Info("[POC] runTasks: Starting prune phase", "pruneTaskCount", len(pruneTasks))
 		if !sc.pruneConfirmed {
 			var resources []string
 			for _, task := range pruneTasks {
@@ -1275,6 +1323,7 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 				}
 			}
 			if len(resources) > 0 {
+				sc.log.Info("[POC] runTasks: Prune requires confirmation", "resourceCount", len(resources))
 				sc.log.WithValues("resources", resources).Info("Prune requires confirmation")
 				andMessage := ""
 				if len(resources) > 1 {
@@ -1311,6 +1360,7 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 
 	// delete anything that need deleting
 	hooksPendingDeletion := createTasks.Filter(func(t *syncTask) bool { return t.deleteBeforeCreation() })
+	sc.log.Info("[POC] runTasks: Checking hooks pending deletion", "hooksPendingDeletionCount", hooksPendingDeletion.Len())
 	if hooksPendingDeletion.Len() > 0 {
 		ss := newStateSync(state)
 		for _, task := range hooksPendingDeletion {
@@ -1343,6 +1393,7 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 	}
 
 	// finally create resources
+	sc.log.Info("[POC] runTasks: Starting create phase", "createTaskCount", len(createTasks))
 	var tasksGroup syncTasks
 	for _, task := range createTasks {
 		// Only wait if the type of the next task is different than the previous type
@@ -1356,13 +1407,16 @@ func (sc *syncContext) runTasks(tasks syncTasks, dryRun bool) runState {
 	if len(tasksGroup) > 0 {
 		state = sc.processCreateTasks(state, tasksGroup, dryRun)
 	}
+	sc.log.Info("[POC] runTasks: Task execution completed", "finalState", state)
 	return state
 }
 
 func (sc *syncContext) processCreateTasks(state runState, tasks syncTasks, dryRun bool) runState {
+	sc.log.Info("[POC] processCreateTasks: Starting create tasks processing", "taskCount", len(tasks), "dryRun", dryRun, "initialState", state)
 	ss := newStateSync(state)
 	for _, task := range tasks {
 		if dryRun && task.skipDryRun {
+			sc.log.Info("[POC] processCreateTasks: Skipping task in dry run", "kind", task.kind(), "name", task.name())
 			continue
 		}
 		t := task
@@ -1370,10 +1424,14 @@ func (sc *syncContext) processCreateTasks(state runState, tasks syncTasks, dryRu
 			logCtx := sc.log.WithValues("dryRun", dryRun, "task", t)
 			logCtx.V(1).Info("Applying")
 			validate := sc.validate && !resourceutil.HasAnnotationOption(t.targetObj, common.AnnotationSyncOptions, common.SyncOptionsDisableValidation)
+			sc.log.Info("[POC] processCreateTasks: Applying task", "kind", t.kind(), "name", t.name(), "validate", validate)
 			result, message := sc.applyObject(t, dryRun, validate)
 			if result == common.ResultCodeSyncFailed {
+				sc.log.Info("[POC] processCreateTasks: Task apply failed", "kind", t.kind(), "name", t.name(), "message", message)
 				logCtx.WithValues("message", message).Info("Apply failed")
 				state = failed
+			} else {
+				sc.log.Info("[POC] processCreateTasks: Task apply successful", "kind", t.kind(), "name", t.name(), "result", result)
 			}
 			if !dryRun || sc.dryRun || result == common.ResultCodeSyncFailed {
 				phase := operationPhases[result]
@@ -1387,11 +1445,14 @@ func (sc *syncContext) processCreateTasks(state runState, tasks syncTasks, dryRu
 			return state
 		})
 	}
-	return ss.Wait()
+	finalState := ss.Wait()
+	sc.log.Info("[POC] processCreateTasks: Processing completed", "finalState", finalState)
+	return finalState
 }
 
 // setResourceResult sets a resource details in the SyncResult.Resources list
 func (sc *syncContext) setResourceResult(task *syncTask, syncStatus common.ResultCode, operationState common.OperationPhase, message string) {
+	sc.log.Info("[POC] setResourceResult: Setting resource result", "kind", task.kind(), "name", task.name(), "namespace", task.namespace(), "syncStatus", syncStatus, "operationState", operationState, "message", message)
 	task.syncStatus = syncStatus
 	task.operationState = operationState
 	// we always want to keep the latest message
@@ -1419,6 +1480,7 @@ func (sc *syncContext) setResourceResult(task *syncTask, syncStatus common.Resul
 	if ok {
 		// update existing value
 		if res.Status != existing.Status || res.HookPhase != existing.HookPhase || res.Message != existing.Message {
+			sc.log.Info("[POC] setResourceResult: Updating existing result", "oldStatus", existing.Status, "newStatus", res.Status, "oldPhase", existing.HookPhase, "newPhase", res.HookPhase)
 			logCtx.Info(fmt.Sprintf("Updating resource result, status: '%s' -> '%s', phase '%s' -> '%s', message '%s' -> '%s'",
 				existing.Status, res.Status,
 				existing.HookPhase, res.HookPhase,
@@ -1426,9 +1488,12 @@ func (sc *syncContext) setResourceResult(task *syncTask, syncStatus common.Resul
 			existing.Status = res.Status
 			existing.HookPhase = res.HookPhase
 			existing.Message = res.Message
+		} else {
+			sc.log.Info("[POC] setResourceResult: No changes to existing result")
 		}
 		sc.syncRes[task.resultKey()] = existing
 	} else {
+		sc.log.Info("[POC] setResourceResult: Adding new result", "order", len(sc.syncRes)+1)
 		logCtx.Info(fmt.Sprintf("Adding resource result, status: '%s', phase: '%s', message: '%s'", res.Status, res.HookPhase, res.Message))
 		res.Order = len(sc.syncRes) + 1
 		sc.syncRes[task.resultKey()] = res

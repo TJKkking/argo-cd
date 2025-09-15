@@ -862,16 +862,17 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 		if err != nil {
 			return nil, fmt.Errorf("error getting app resources: %w", err)
 		}
+		log.Infof("POC ListResourceEvents Tree length: %d, %+v", len(tree.Nodes), tree)
 		found := false
 		for _, n := range append(tree.Nodes, tree.OrphanedNodes...) {
-			log.Infof("POC Checking resource: %s, %s, %s", n.ResourceRef.UID, n.ResourceRef.Name, n.ResourceRef.Namespace)
+			log.Infof("POC ListResourceEvents Checking resource: %s, %s, %s", n.ResourceRef.UID, n.ResourceRef.Name, n.ResourceRef.Namespace)
 			if n.ResourceRef.UID == q.GetResourceUID() && n.ResourceRef.Name == q.GetResourceName() && n.ResourceRef.Namespace == q.GetResourceNamespace() {
 				found = true
 				break
 			}
 		}
 		if !found {
-			log.Infof("POC Resource not found: %s, %s, %s", q.GetResourceUID(), q.GetResourceName(), q.GetResourceNamespace())
+			log.Infof("POC ListResourceEvents Resource not found: %s, %s, %s", q.GetResourceUID(), q.GetResourceName(), q.GetResourceNamespace())
 			return nil, status.Errorf(codes.InvalidArgument, "%s not found as part of application %s", q.GetResourceName(), q.GetName())
 		}
 
@@ -891,13 +892,13 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 			"involvedObject.namespace": namespace,
 		}).String()
 	}
-	log.Infof("POC Querying for resource events with field selector: %s", fieldSelector)
+	log.Infof("POC ListResourceEvents Querying for resource events with field selector: %s", fieldSelector)
 	opts := metav1.ListOptions{FieldSelector: fieldSelector}
 	list, err := kubeClientset.CoreV1().Events(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("error listing resource events: %w", err)
 	}
-	log.Infof("POC Resource events listed: %d", len(list.Items))
+	log.Infof("POC ListResourceEvents Resource events listed: %d, name: %s, namespace: %s, uid: %s", len(list.Items), q.GetResourceName(), q.GetResourceNamespace(), q.GetResourceUID())
 	return list.DeepCopy(), nil
 }
 
