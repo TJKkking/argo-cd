@@ -405,15 +405,15 @@ func (sc *syncContext) setRunningPhase(tasks []*syncTask, isPendingDeletion bool
 
 // sync has performs the actual apply or hook based sync
 func (sc *syncContext) Sync() {
-	sc.log.Info("[POC] Sync: Starting sync operation")
-	sc.log.WithValues("skipHooks", sc.skipHooks, "started", sc.started()).Info("Syncing")
+	sc.log.Info("[AD POC] Sync: Starting sync operation")
+	sc.log.WithValues("skipHooks", sc.skipHooks, "started", sc.started()).Info("[AD POC] Sync: Syncing with configuration")
 	tasks, ok := sc.getSyncTasks()
 	if !ok {
-		sc.log.Info("[POC] Sync: Failed to get sync tasks")
+		sc.log.Info("[AD POC] Sync: Failed to get sync tasks")
 		sc.setOperationPhase(common.OperationFailed, "one or more synchronization tasks are not valid")
 		return
 	}
-	sc.log.Info("[POC] Sync: Got sync tasks", "taskCount", len(tasks))
+	sc.log.Info("[AD POC] Sync: Got sync tasks", "taskCount", len(tasks))
 
 	if sc.started() {
 		sc.log.WithValues("tasks", tasks).Info("Tasks")
@@ -430,14 +430,14 @@ func (sc *syncContext) Sync() {
 			dryRunTasks = sc.filterOutOfSyncTasks(tasks)
 		}
 
-		sc.log.Info("[POC] Sync: Starting dry-run validation", "dryRunTaskCount", len(dryRunTasks))
-		sc.log.WithValues("tasks", dryRunTasks).Info("Tasks (dry-run)")
+		sc.log.Info("[AD POC] Sync: Starting dry-run validation", "dryRunTaskCount", len(dryRunTasks))
+		sc.log.WithValues("tasks", dryRunTasks).Info("[AD POC] Sync: Tasks (dry-run)")
 		if sc.runTasks(dryRunTasks, true) == failed {
-			sc.log.Info("[POC] Sync: Dry-run validation failed")
+			sc.log.Info("[AD POC] Sync: Dry-run validation failed")
 			sc.setOperationPhase(common.OperationFailed, "one or more objects failed to apply (dry run)")
 			return
 		}
-		sc.log.Info("[POC] Sync: Dry-run validation successful")
+		sc.log.Info("[AD POC] Sync: Dry-run validation successful")
 	}
 
 	// update status of any tasks that are running, note that this must exclude pruning tasks
@@ -479,7 +479,7 @@ func (sc *syncContext) Sync() {
 	multiStep := tasks.multiStep()
 	runningTasks := tasks.Filter(func(t *syncTask) bool { return (multiStep || t.isHook()) && t.running() })
 	if runningTasks.Len() > 0 {
-		sc.log.Info("[POC] Sync: Found running tasks, waiting", "runningTaskCount", runningTasks.Len())
+		sc.log.Info("[AD POC] Sync: Found running tasks, waiting", "runningTaskCount", runningTasks.Len())
 		sc.setRunningPhase(runningTasks, false)
 		return
 	}
@@ -492,7 +492,7 @@ func (sc *syncContext) Sync() {
 		return false
 	})
 	if prunedTasksPendingDelete.Len() > 0 {
-		sc.log.Info("[POC] Sync: Found pruned tasks pending deletion, waiting", "pendingDeleteCount", prunedTasksPendingDelete.Len())
+		sc.log.Info("[AD POC] Sync: Found pruned tasks pending deletion, waiting", "pendingDeleteCount", prunedTasksPendingDelete.Len())
 		sc.setRunningPhase(prunedTasksPendingDelete, true)
 		return
 	}
@@ -522,7 +522,7 @@ func (sc *syncContext) Sync() {
 
 	// if there are any completed but unsuccessful tasks, sync is a failure.
 	if tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() }) {
-		sc.log.Info("[POC] Sync: Found unsuccessful completed tasks, marking sync as failed")
+		sc.log.Info("[AD POC] Sync: Found unsuccessful completed tasks, marking sync as failed")
 		sc.deleteHooks(hooksPendingDeletionFailed)
 		sc.setOperationFailed(syncFailTasks, syncFailedTasks, "one or more synchronization tasks completed unsuccessfully")
 		return
@@ -539,7 +539,7 @@ func (sc *syncContext) Sync() {
 	// If no sync tasks were generated (e.g., in case all application manifests have been removed),
 	// the sync operation is successful.
 	if len(tasks) == 0 {
-		sc.log.Info("[POC] Sync: No sync tasks remaining, sync successful")
+		sc.log.Info("[AD POC] Sync: No sync tasks remaining, sync successful")
 		// delete all completed hooks which have appropriate delete policy
 		sc.deleteHooks(hooksPendingDeletionSuccessful)
 		sc.setOperationPhase(common.OperationSucceeded, "successfully synced (no more tasks)")
@@ -556,17 +556,17 @@ func (sc *syncContext) Sync() {
 	// This handles the common case where neither hooks or waves are used and a sync equates to simply an (asynchronous) kubectl apply of manifests, which succeeds immediately.
 	remainingTasks := tasks.Filter(func(t *syncTask) bool { return t.phase != phase || wave != t.wave() || t.isHook() })
 
-	sc.log.Info("[POC] Sync: Processing phase and wave", "phase", phase, "wave", wave, "totalTasks", len(tasks))
-	sc.log.WithValues("phase", phase, "wave", wave, "tasks", tasks, "syncFailTasks", syncFailTasks).V(1).Info("Filtering tasks in correct phase and wave")
+	sc.log.Info("[AD POC] Sync: Processing phase and wave", "phase", phase, "wave", wave, "totalTasks", len(tasks))
+	sc.log.WithValues("phase", phase, "wave", wave, "tasks", tasks, "syncFailTasks", syncFailTasks).V(1).Info("[AD POC] Sync: Filtering tasks in correct phase and wave")
 	tasks = tasks.Filter(func(t *syncTask) bool { return t.phase == phase && t.wave() == wave })
-	sc.log.Info("[POC] Sync: Filtered tasks for current phase and wave", "filteredTaskCount", len(tasks))
+	sc.log.Info("[AD POC] Sync: Filtered tasks for current phase and wave", "filteredTaskCount", len(tasks))
 
 	sc.setOperationPhase(common.OperationRunning, "one or more tasks are running")
 
-	sc.log.Info("[POC] Sync: Starting wet-run (actual execution)", "taskCount", len(tasks))
-	sc.log.WithValues("tasks", tasks).V(1).Info("Wet-run")
+	sc.log.Info("[AD POC] Sync: Starting wet-run (actual execution)", "taskCount", len(tasks))
+	sc.log.WithValues("tasks", tasks).V(1).Info("[AD POC] Sync: Wet-run")
 	runState := sc.runTasks(tasks, false)
-	sc.log.Info("[POC] Sync: Wet-run completed", "runState", runState)
+	sc.log.Info("[AD POC] Sync: Wet-run completed", "runState", runState)
 
 	if sc.syncWaveHook != nil && runState != failed {
 		err := sc.syncWaveHook(phase, wave, finalWave)
@@ -580,23 +580,23 @@ func (sc *syncContext) Sync() {
 
 	switch runState {
 	case failed:
-		sc.log.Info("[POC] Sync: Run state failed")
+		sc.log.Info("[AD POC] Sync: Run state failed")
 		syncFailedTasks, _ := tasks.Split(func(t *syncTask) bool { return t.syncStatus == common.ResultCodeSyncFailed })
 		sc.deleteHooks(hooksPendingDeletionFailed)
 		sc.setOperationFailed(syncFailTasks, syncFailedTasks, "one or more objects failed to apply")
 	case successful:
-		sc.log.Info("[POC] Sync: Run state successful", "remainingTaskCount", remainingTasks.Len())
+		sc.log.Info("[AD POC] Sync: Run state successful", "remainingTaskCount", remainingTasks.Len())
 		if remainingTasks.Len() == 0 {
-			sc.log.Info("[POC] Sync: All tasks completed successfully")
+			sc.log.Info("[AD POC] Sync: All tasks completed successfully")
 			// delete all completed hooks which have appropriate delete policy
 			sc.deleteHooks(hooksPendingDeletionSuccessful)
 			sc.setOperationPhase(common.OperationSucceeded, "successfully synced (all tasks run)")
 		} else {
-			sc.log.Info("[POC] Sync: Setting running phase for remaining tasks")
+			sc.log.Info("[AD POC] Sync: Setting running phase for remaining tasks")
 			sc.setRunningPhase(remainingTasks, false)
 		}
 	default:
-		sc.log.Info("[POC] Sync: Run state pending")
+		sc.log.Info("[AD POC] Sync: Run state pending")
 		sc.setRunningPhase(tasks.Filter(func(task *syncTask) bool {
 			return task.deleteOnPhaseCompletion()
 		}), true)

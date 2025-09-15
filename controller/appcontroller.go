@@ -1368,10 +1368,12 @@ func (ctrl *ApplicationController) setAppCondition(app *appv1.Application, condi
 
 func (ctrl *ApplicationController) processRequestedAppOperation(app *appv1.Application) {
 	logCtx := getAppLog(app)
+	log.Infof("[AD POC] processRequestedAppOperation: Starting to process operation for application %s", app.Name)
 	var state *appv1.OperationState
 	// Recover from any unexpected panics and automatically set the status to be failed
 	defer func() {
 		if r := recover(); r != nil {
+			log.Errorf("[AD POC] processRequestedAppOperation: Recovered from panic in application %s: %+v\n%s", app.Name, r, debug.Stack())
 			logCtx.Errorf("Recovered from panic: %+v\n%s", r, debug.Stack())
 			state.Phase = synccommon.OperationError
 			if rerr, ok := r.(error); ok {
@@ -1392,6 +1394,7 @@ func (ctrl *ApplicationController) processRequestedAppOperation(app *appv1.Appli
 	}()
 	terminating := false
 	if isOperationInProgress(app) {
+		log.Infof("[AD POC] processRequestedAppOperation: Operation in progress for application %s, resuming", app.Name)
 		state = app.Status.OperationState.DeepCopy()
 		terminating = state.Phase == synccommon.OperationTerminating
 		// Failed  operation with retry strategy might have be in-progress and has completion time
@@ -1425,6 +1428,7 @@ func (ctrl *ApplicationController) processRequestedAppOperation(app *appv1.Appli
 			logCtx.Infof("Resuming in-progress operation. phase: %s, message: %s", state.Phase, state.Message)
 		}
 	} else {
+		log.Infof("[AD POC] processRequestedAppOperation: Initializing new operation for application %s", app.Name)
 		state = &appv1.OperationState{Phase: synccommon.OperationRunning, Operation: *app.Operation, StartedAt: metav1.Now()}
 		ctrl.setOperationState(app, state)
 		if ctrl.syncTimeout != time.Duration(0) {
@@ -1432,22 +1436,28 @@ func (ctrl *ApplicationController) processRequestedAppOperation(app *appv1.Appli
 			ctrl.appOperationQueue.AddAfter(ctrl.toAppKey(app.QualifiedName()), ctrl.syncTimeout)
 		}
 		logCtx.Infof("Initialized new operation: %v", *app.Operation)
+		log.Infof("[AD POC] processRequestedAppOperation: New operation initialized for application %s", app.Name)
 	}
 	ts.AddCheckpoint("initial_operation_stage_ms")
 
 	// Call GetDestinationCluster to validate the destination cluster.
+	log.Infof("[AD POC] processRequestedAppOperation: Validating destination cluster for application %s", app.Name)
 	if _, err := argo.GetDestinationCluster(context.Background(), app.Spec.Destination, ctrl.db); err != nil {
+		log.Errorf("[AD POC] processRequestedAppOperation: Failed to get destination cluster for application %s: %v", app.Name, err)
 		state.Phase = synccommon.OperationFailed
 		state.Message = err.Error()
 	} else {
+		log.Infof("[AD POC] processRequestedAppOperation: Destination cluster validated, calling SyncAppState for application %s", app.Name)
 		ctrl.appStateManager.SyncAppState(app, state)
 	}
 	ts.AddCheckpoint("validate_and_sync_app_state_ms")
 
 	// Check whether application is allowed to use project
+	log.Debugf("[AD POC] processRequestedAppOperation: Checking project permissions for application %s", app.Name)
 	_, err := ctrl.getAppProj(app)
 	ts.AddCheckpoint("get_app_proj_ms")
 	if err != nil {
+		log.Errorf("[AD POC] processRequestedAppOperation: Project permission check failed for application %s: %v", app.Name, err)
 		state.Phase = synccommon.OperationError
 		state.Message = err.Error()
 	}

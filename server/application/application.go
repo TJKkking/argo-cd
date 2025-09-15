@@ -1935,24 +1935,35 @@ func isTheSelectedOne(currentNode *v1alpha1.ResourceNode, q *application.Applica
 
 // Sync syncs an application to its target state
 func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncRequest) (*v1alpha1.Application, error) {
+	log.Infof("[AD POC] Sync: Starting sync request for application %s", syncReq.GetName())
+
 	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
 	if err != nil {
+		log.Errorf("[AD POC] Sync: Failed to get application with RBAC enforcement for %s: %v", syncReq.GetName(), err)
 		return nil, err
 	}
+	log.Infof("[AD POC] Sync: Successfully retrieved application %s", a.Name)
 
 	s.inferResourcesStatusHealth(a)
 
+	log.Infof("[AD POC] Sync: Checking sync windows for application %s", a.Name)
 	canSync, err := proj.Spec.SyncWindows.Matches(a).CanSync(true)
 	if err != nil {
+		log.Errorf("[AD POC] Sync: Invalid sync window for application %s: %v", a.Name, err)
 		return a, status.Errorf(codes.PermissionDenied, "cannot sync: invalid sync window: %v", err)
 	}
 	if !canSync {
+		log.Warnf("[AD POC] Sync: Sync blocked by sync window for application %s", a.Name)
 		return a, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
 	}
+	log.Infof("[AD POC] Sync: Sync window check passed for application %s", a.Name)
 
+	log.Infof("[AD POC] Sync: Enforcing RBAC sync permission for application %s", a.Name)
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
+		log.Errorf("[AD POC] Sync: RBAC permission denied for sync action on application %s: %v", a.Name, err)
 		return nil, err
 	}
+	log.Infof("[AD POC] Sync: RBAC permission check passed for application %s", a.Name)
 
 	if syncReq.Manifests != nil {
 		if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionOverride, a.RBACName(s.ns)); err != nil {
@@ -1966,10 +1977,13 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 		return nil, status.Errorf(codes.FailedPrecondition, "application is deleting")
 	}
 
+	log.Infof("[AD POC] Sync: Resolving source revisions for application %s", a.Name)
 	revision, displayRevision, sourceRevisions, displayRevisions, err := s.resolveSourceRevisions(ctx, a, syncReq)
 	if err != nil {
+		log.Errorf("[AD POC] Sync: Failed to resolve source revisions for application %s: %v", a.Name, err)
 		return nil, err
 	}
+	log.Infof("[AD POC] Sync: Source revisions resolved for application %s, revision: %s", a.Name, revision)
 
 	var retry *v1alpha1.RetryStrategy
 	var syncOptions v1alpha1.SyncOptions
@@ -2023,10 +2037,14 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	appName := syncReq.GetName()
 	appNs := s.appNamespaceOrDefault(syncReq.GetAppNamespace())
 	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
+
+	log.Infof("[AD POC] Sync: Setting sync operation for application %s in namespace %s", appName, appNs)
 	a, err = argo.SetAppOperation(appIf, appName, &op)
 	if err != nil {
+		log.Errorf("[AD POC] Sync: Failed to set app operation for application %s: %v", appName, err)
 		return nil, fmt.Errorf("error setting app operation: %w", err)
 	}
+	log.Infof("[AD POC] Sync: Successfully set sync operation for application %s", appName)
 	partial := ""
 	if len(syncReq.Resources) > 0 {
 		partial = "partial "
@@ -2041,6 +2059,7 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 		reason = fmt.Sprintf("initiated %ssync locally", partial)
 	}
 	s.logAppEvent(ctx, a, argo.EventReasonOperationStarted, reason)
+	log.Infof("[AD POC] Sync: Sync request completed successfully for application %s, reason: %s", a.Name, reason)
 	return a, nil
 }
 

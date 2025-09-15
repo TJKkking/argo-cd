@@ -90,6 +90,7 @@ func (m *appStateManager) getServerSideDiffDryRunApplier(cluster *v1alpha1.Clust
 }
 
 func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha1.OperationState) {
+	log.Infof("[AD POC] SyncAppState: Starting sync for application %s", app.Name)
 	// Sync requests might be requested with ambiguous revisions (e.g. master, HEAD, v1.2.3).
 	// This can change meaning when resuming operations (e.g a hook sync). After calculating a
 	// concrete git commit SHA, the SHA is remembered in the status.operationState.syncResult field.
@@ -103,16 +104,20 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 	revisions := make([]string, 0)
 
 	if state.Operation.Sync == nil {
+		log.Errorf("[AD POC] SyncAppState: No sync operation specified for application %s", app.Name)
 		state.Phase = common.OperationFailed
 		state.Message = "Invalid operation request: no operation specified"
 		return
 	}
 	syncOp = *state.Operation.Sync
+	log.Infof("[AD POC] SyncAppState: Retrieved sync operation for application %s", app.Name)
 
 	// validates if it should fail the sync if it finds shared resources
+	log.Debugf("[AD POC] SyncAppState: Checking for shared resources for application %s", app.Name)
 	hasSharedResource, sharedResourceMessage := hasSharedResourceCondition(app)
 	if syncOp.SyncOptions.HasOption("FailOnSharedResource=true") &&
 		hasSharedResource {
+		log.Warnf("[AD POC] SyncAppState: Shared resource found for application %s: %s", app.Name, sharedResourceMessage)
 		state.Phase = common.OperationFailed
 		state.Message = "Shared resource found: " + sharedResourceMessage
 		return
@@ -171,14 +176,18 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 		}
 	}
 
+	log.Infof("[AD POC] SyncAppState: Getting application project for application %s", app.Name)
 	proj, err := argo.GetAppProject(context.TODO(), app, listersv1alpha1.NewAppProjectLister(m.projInformer.GetIndexer()), m.namespace, m.settingsMgr, m.db)
 	if err != nil {
+		log.Errorf("[AD POC] SyncAppState: Failed to load application project for application %s: %v", app.Name, err)
 		state.Phase = common.OperationError
 		state.Message = fmt.Sprintf("Failed to load application project: %v", err)
 		return
 	} else {
+		log.Debugf("[AD POC] SyncAppState: Checking sync windows for application %s", app.Name)
 		isBlocked, err := syncWindowPreventsSync(app, proj)
 		if isBlocked {
+			log.Warnf("[AD POC] SyncAppState: Sync blocked by sync window for application %s", app.Name)
 			// If the operation is currently running, simply let the user know the sync is blocked by a current sync window
 			if state.Phase == common.OperationRunning {
 				state.Message = "Sync operation blocked by sync window"
@@ -188,6 +197,7 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 			}
 			return
 		}
+		log.Infof("[AD POC] SyncAppState: Sync window check passed for application %s", app.Name)
 	}
 
 	if !isMultiSourceRevision {
@@ -196,12 +206,15 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 	}
 
 	// ignore error if CompareStateRepoError, this shouldn't happen as noRevisionCache is true
+	log.Infof("[AD POC] SyncAppState: Comparing application state for application %s", app.Name)
 	compareResult, err := m.CompareAppState(app, proj, revisions, sources, false, true, syncOp.Manifests, isMultiSourceRevision, rollback)
 	if err != nil && !stderrors.Is(err, CompareStateRepoError) {
+		log.Errorf("[AD POC] SyncAppState: Failed to compare application state for application %s: %v", app.Name, err)
 		state.Phase = common.OperationError
 		state.Message = err.Error()
 		return
 	}
+	log.Infof("[AD POC] SyncAppState: Application state comparison completed for application %s", app.Name)
 	// We now have a concrete commit SHA. Save this in the sync result revision so that we remember
 	// what we should be syncing to when resuming operations.
 
@@ -381,6 +394,7 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 		opts = append(opts, sync.WithNamespaceModifier(syncNamespace(app.Spec.SyncPolicy)))
 	}
 
+	log.Infof("[AD POC] SyncAppState: Creating sync context for application %s", app.Name)
 	syncCtx, cleanup, err := sync.NewSyncContext(
 		compareResult.syncStatus.Revision,
 		reconciliationResult,
@@ -392,22 +406,27 @@ func (m *appStateManager) SyncAppState(app *v1alpha1.Application, state *v1alpha
 		opts...,
 	)
 	if err != nil {
+		log.Errorf("[AD POC] SyncAppState: Failed to initialize sync context for application %s: %v", app.Name, err)
 		state.Phase = common.OperationError
 		state.Message = fmt.Sprintf("failed to initialize sync context: %v", err)
 		return
 	}
+	log.Infof("[AD POC] SyncAppState: Sync context created successfully for application %s", app.Name)
 
 	defer cleanup()
 
 	start := time.Now()
 
 	if state.Phase == common.OperationTerminating {
+		log.Infof("[AD POC] SyncAppState: Terminating sync operation for application %s", app.Name)
 		syncCtx.Terminate()
 	} else {
+		log.Infof("[AD POC] SyncAppState: Executing sync operation for application %s", app.Name)
 		syncCtx.Sync()
 	}
 	var resState []common.ResourceSyncResult
 	state.Phase, state.Message, resState = syncCtx.GetState()
+	log.Infof("[AD POC] SyncAppState: Sync operation completed for application %s, phase: %s", app.Name, state.Phase)
 	state.SyncResult.Resources = nil
 
 	if app.Spec.SyncPolicy != nil {

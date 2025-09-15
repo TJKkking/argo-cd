@@ -837,28 +837,39 @@ func verifyGenerateManifests(
 
 // SetAppOperation updates an application with the specified operation, retrying conflict errors
 func SetAppOperation(appIf v1alpha1.ApplicationInterface, appName string, op *argoappv1.Operation) (*argoappv1.Application, error) {
+	log.Infof("[AD POC] SetAppOperation: Starting to set operation for application %s", appName)
+
 	for {
+		log.Debugf("[AD POC] SetAppOperation: Getting application %s from k8s API", appName)
 		a, err := appIf.Get(context.Background(), appName, metav1.GetOptions{})
 		if err != nil {
+			log.Errorf("[AD POC] SetAppOperation: Failed to get application %s: %v", appName, err)
 			return nil, fmt.Errorf("error getting application %q: %w", appName, err)
 		}
 		a = a.DeepCopy()
+		log.Debugf("[AD POC] SetAppOperation: Retrieved application %s, checking for existing operations", appName)
 		if a.Operation != nil {
+			log.Warnf("[AD POC] SetAppOperation: Another operation is already in progress for application %s", appName)
 			return nil, ErrAnotherOperationInProgress
 		}
+		log.Infof("[AD POC] SetAppOperation: Setting sync operation for application %s", appName)
 		a.Operation = op
 		a.Status.OperationState = nil
+		log.Debugf("[AD POC] SetAppOperation: Updating application %s with new operation", appName)
 		a, err = appIf.Update(context.Background(), a, metav1.UpdateOptions{})
 		if op.Sync == nil {
+			log.Errorf("[AD POC] SetAppOperation: Operation unspecified for application %s", appName)
 			return nil, status.Errorf(codes.InvalidArgument, "Operation unspecified")
 		}
 		if err == nil {
+			log.Infof("[AD POC] SetAppOperation: Successfully set operation for application %s", appName)
 			return a, nil
 		}
 		if !apierrors.IsConflict(err) {
+			log.Errorf("[AD POC] SetAppOperation: Failed to update application %s: %v", appName, err)
 			return nil, fmt.Errorf("error updating application %q: %w", appName, err)
 		}
-		log.Warnf("Failed to set operation for app '%s' due to update conflict. Retrying again...", appName)
+		log.Warnf("[AD POC] SetAppOperation: Failed to set operation for app '%s' due to update conflict. Retrying again...", appName)
 	}
 }
 
