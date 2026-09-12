@@ -149,7 +149,7 @@ func TestIsKustomization(t *testing.T) {
 }
 
 func TestParseKustomizeBuildOptions(t *testing.T) {
-	built := parseKustomizeBuildOptions(&kustomize{path: "guestbook"}, "-v 6 --logtostderr", &BuildOpts{
+	built := parseKustomizeBuildOptions(t.Context(), &kustomize{path: "guestbook"}, "-v 6 --logtostderr", &BuildOpts{
 		KubeVersion: "1.27", APIVersions: []string{"foo", "bar"},
 	})
 	// Helm is not enabled so helm options are not in the params
@@ -157,7 +157,7 @@ func TestParseKustomizeBuildOptions(t *testing.T) {
 }
 
 func TestParseKustomizeBuildHelmOptions(t *testing.T) {
-	built := parseKustomizeBuildOptions(&kustomize{path: "guestbook"}, "-v 6 --logtostderr --enable-helm", &BuildOpts{
+	built := parseKustomizeBuildOptions(t.Context(), &kustomize{path: "guestbook"}, "-v 6 --logtostderr --enable-helm", &BuildOpts{
 		KubeVersion: "1.27",
 		APIVersions: []string{"foo", "bar"},
 	})
@@ -176,13 +176,13 @@ func TestVersion(t *testing.T) {
 }
 
 func TestVersionWithBinaryPath(t *testing.T) {
-	ver, err := versionWithBinaryPath(&kustomize{binaryPath: "kustomize"})
+	ver, err := versionWithBinaryPath(t.Context(), &kustomize{binaryPath: "kustomize"})
 	require.NoError(t, err)
 	assert.NotEmpty(t, ver)
 }
 
 func TestGetSemver(t *testing.T) {
-	ver, err := getSemver(&kustomize{})
+	ver, err := getSemver(t.Context(), &kustomize{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, ver)
 }
@@ -548,12 +548,8 @@ func TestKustomizeBuildPatches(t *testing.T) {
 			{
 				Patch: `[ { "op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value": 443 },  { "op": "replace", "path": "/spec/template/spec/containers/0/name", "value": "test" }]`,
 				Target: &v1alpha1.KustomizeSelector{
-					KustomizeResId: v1alpha1.KustomizeResId{
-						KustomizeGvk: v1alpha1.KustomizeGvk{
-							Kind: "Deployment",
-						},
-						Name: "nginx-deployment",
-					},
+					Kind: "Deployment",
+					Name: "nginx-deployment",
 				},
 			},
 		},
@@ -600,12 +596,8 @@ func TestFailKustomizeBuildPatches(t *testing.T) {
 			{
 				Patch: `[ { "op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value": 443 },  { "op": "replace", "path": "/spec/template/spec/containers/0/name", "value": "test" }]`,
 				Target: &v1alpha1.KustomizeSelector{
-					KustomizeResId: v1alpha1.KustomizeResId{
-						KustomizeGvk: v1alpha1.KustomizeGvk{
-							Kind: "Deployment",
-						},
-						Name: "nginx-deployment",
-					},
+					Kind: "Deployment",
+					Name: "nginx-deployment",
 				},
 			},
 		},

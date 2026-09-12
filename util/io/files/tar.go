@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -136,16 +138,25 @@ func untar(dstPath string, r io.Reader, preserveFileMode bool) error {
 		case tar.TypeSymlink:
 			// Sanity check to protect against symlink exploit
 			linkTarget := filepath.Join(filepath.Dir(target), header.Linkname)
-			realPath, err := filepath.EvalSymlinks(linkTarget)
+			realLinkTarget, err := filepath.EvalSymlinks(linkTarget)
 			if os.IsNotExist(err) {
-				realPath = linkTarget
+				realLinkTarget = linkTarget
 			} else if err != nil {
 				return fmt.Errorf("error checking symlink realpath: %w", err)
 			}
-			if !Inbound(realPath, dstPath) {
+			if !Inbound(realLinkTarget, dstPath) {
 				return fmt.Errorf("illegal filepath in symlink: %s", linkTarget)
 			}
-			err = os.Symlink(realPath, target)
+
+			// Relativizing all symlink targets because path.CheckOutOfBoundsSymlinks disallows any absolute symlinks
+			// and it makes more sense semantically to view symlinks in archives as relative.
+			// Inbound ensures that we never allow symlinks that break out of the target directory.
+			realLinkTarget, err = filepath.Rel(filepath.Dir(target), realLinkTarget)
+			if err != nil {
+				return fmt.Errorf("error relativizing link target: %w", err)
+			}
+
+			err = os.Symlink(realLinkTarget, target)
 			if err != nil {
 				return fmt.Errorf("error creating symlink: %w", err)
 			}
@@ -175,10 +186,30 @@ func untar(dstPath string, r io.Reader, preserveFileMode bool) error {
 	return nil
 }
 
+func matchPath(pattern, relativePath string) (bool, error) {
+	normPattern := filepath.ToSlash(pattern)
+	normPath := filepath.ToSlash(relativePath)
+	return doublestar.Match(normPattern, normPath)
+}
+
+func matchesPattern(pattern, base, relativePath string) (bool, error) {
+	if strings.Contains(filepath.ToSlash(pattern), "/") {
+		return matchPath(pattern, relativePath)
+	}
+	return filepath.Match(pattern, base)
+}
+
 // tgzFile is used as a filepath.WalkFunc implementing the logic to write
 // the given file in the tgz.tarWriter applying the exclusion pattern defined
 // in tgz.exclusions, or the inclusion pattern defined in tgz.inclusions.
 // Only regular files will be added in the tarball.
+//
+// Inclusion pattern matching rules:
+//   - Patterns containing a path separator ('/') are matched against the
+//     file's relative path. The special segment "**" matches zero or more
+//     path segments, so "charts/**" includes every file under charts/.
+//   - Patterns without a path separator are matched against the filename only
+//     via filepath.Match (original behaviour, e.g. "*.yaml").
 func (t *tgz) tgzFile(path string, fi os.FileInfo, err error) error {
 	if err != nil {
 		return fmt.Errorf("error walking in %q: %w", t.srcPath, err)
@@ -190,13 +221,14 @@ func (t *tgz) tgzFile(path string, fi os.FileInfo, err error) error {
 	if err != nil {
 		return fmt.Errorf("relative path error: %w", err)
 	}
+	relativePath = filepath.ToSlash(relativePath)
 
 	if t.inclusions != nil && base != "." && !fi.IsDir() {
 		included := false
 		for _, inclusionPattern := range t.inclusions {
-			found, err := filepath.Match(inclusionPattern, base)
-			if err != nil {
-				return fmt.Errorf("error verifying inclusion pattern %q: %w", inclusionPattern, err)
+			found, matchErr := matchesPattern(inclusionPattern, base, relativePath)
+			if matchErr != nil {
+				return fmt.Errorf("error verifying inclusion pattern %q: %w", inclusionPattern, matchErr)
 			}
 			if found {
 				included = true
@@ -209,9 +241,9 @@ func (t *tgz) tgzFile(path string, fi os.FileInfo, err error) error {
 	}
 	if t.exclusions != nil {
 		for _, exclusionPattern := range t.exclusions {
-			found, err := filepath.Match(exclusionPattern, relativePath)
-			if err != nil {
-				return fmt.Errorf("error verifying exclusion pattern %q: %w", exclusionPattern, err)
+			found, matchErr := matchesExclusionPattern(exclusionPattern, relativePath)
+			if matchErr != nil {
+				return fmt.Errorf("error verifying exclusion pattern %q: %w", exclusionPattern, matchErr)
 			}
 			if found {
 				if fi.IsDir() {
@@ -277,4 +309,12 @@ func supportedFileMode(fi os.FileInfo) bool {
 		return true
 	}
 	return false
+}
+
+func matchesExclusionPattern(pattern, relativePath string) (bool, error) {
+	normPattern := filepath.ToSlash(pattern)
+	if strings.Contains(normPattern, "/") {
+		return matchPath(normPattern, relativePath)
+	}
+	return filepath.Match(normPattern, relativePath)
 }

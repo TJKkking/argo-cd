@@ -15,7 +15,9 @@ interface ItemsList<T> {
     metadata: models.ListMeta;
 }
 
+export interface AbstractApplicationList extends ItemsList<AbstractApplication> {}
 export interface ApplicationList extends ItemsList<Application> {}
+export interface ApplicationSetList extends ItemsList<ApplicationSet> {}
 
 export interface SyncOperationResource {
     group: string;
@@ -44,6 +46,7 @@ export interface RetryBackoff {
 export interface RetryStrategy {
     limit: number;
     backoff: RetryBackoff;
+    refresh: boolean;
 }
 
 export interface RollbackOperation {
@@ -86,6 +89,18 @@ export interface OperationState {
     startedAt: models.Time;
     finishedAt: models.Time;
 }
+
+export type OperationStateTitle = 'Deleting' | 'Syncing' | 'Sync error' | 'Sync failed' | 'Sync OK' | 'Terminated' | 'Unknown';
+
+export const OperationStateTitles = {
+    Deleting: 'Deleting',
+    Syncing: 'Syncing',
+    SyncError: 'Sync error',
+    SyncFailed: 'Sync failed',
+    SyncOK: 'Sync OK',
+    Terminated: 'Terminated',
+    Unknown: 'Unknown'
+} satisfies Record<string, OperationStateTitle>;
 
 export type HookType = 'PreSync' | 'Sync' | 'PostSync' | 'SyncFail' | 'Skip';
 
@@ -151,10 +166,15 @@ export const AnnotationSyncWaveKey = 'argocd.argoproj.io/sync-wave';
 export const AnnotationDefaultView = 'pref.argocd.argoproj.io/default-view';
 export const AnnotationDefaultPodSort = 'pref.argocd.argoproj.io/default-pod-sort';
 
-export interface Application {
+export interface AbstractApplication {
     apiVersion?: string;
     kind?: string;
     metadata: models.ObjectMeta;
+    spec: any;
+    status?: any;
+}
+
+export interface Application extends AbstractApplication {
     spec: ApplicationSpec;
     status: ApplicationStatus;
     operation?: Operation;
@@ -166,6 +186,11 @@ export type WatchType = 'ADDED' | 'MODIFIED' | 'DELETED' | 'ERROR';
 export interface ApplicationWatchEvent {
     type: WatchType;
     application: Application;
+}
+
+export interface ApplicationSetWatchEvent {
+    type: WatchType;
+    applicationSet: ApplicationSet;
 }
 
 export interface ComponentParameter {
@@ -226,6 +251,8 @@ export interface ApplicationSource {
     ref?: string;
 
     name?: string;
+
+    tagPrefix?: string;
 }
 
 export interface SourceHydrator {
@@ -237,12 +264,17 @@ export interface SourceHydrator {
 export interface DrySource {
     repoURL: string;
     targetRevision: string;
-    path: string;
+    path?: string;
+    helm?: ApplicationSourceHelm;
+    kustomize?: ApplicationSourceKustomize;
+    plugin?: ApplicationSourcePlugin;
+    directory?: ApplicationSourceDirectory;
 }
 
 export interface SyncSource {
     targetBranch: string;
     path: string;
+    repoURL?: string;
 }
 
 export interface HydrateTo {
@@ -319,7 +351,7 @@ export interface Info {
 
 export interface ApplicationSpec {
     project: string;
-    source: ApplicationSource;
+    source?: ApplicationSource;
     sources: ApplicationSource[];
     sourceHydrator?: SourceHydrator;
     destination: ApplicationDestination;
@@ -360,6 +392,12 @@ export const SyncStatuses: {[key: string]: SyncStatusCode} = {
     OutOfSync: 'OutOfSync'
 };
 
+export const SyncPriority: Record<SyncStatusCode, number> = {
+    Unknown: 0,
+    OutOfSync: 1,
+    Synced: 2
+};
+
 export type HealthStatusCode = 'Unknown' | 'Progressing' | 'Healthy' | 'Suspended' | 'Degraded' | 'Missing';
 
 export const HealthStatuses: {[key: string]: HealthStatusCode} = {
@@ -369,6 +407,15 @@ export const HealthStatuses: {[key: string]: HealthStatusCode} = {
     Degraded: 'Degraded',
     Missing: 'Missing',
     Unknown: 'Unknown'
+};
+
+export const HealthPriority: Record<HealthStatusCode, number> = {
+    Missing: 0,
+    Degraded: 1,
+    Unknown: 2,
+    Progressing: 3,
+    Suspended: 4,
+    Healthy: 5
 };
 
 export interface HealthStatus {
@@ -396,6 +443,14 @@ export interface ResourceStatus {
     requiresDeletionConfirmation?: boolean;
     syncWave?: number;
     orphaned?: boolean;
+}
+
+export interface Resource extends ResourceStatus {
+    appProject?: string;
+    appName?: string;
+    appNamespace?: string;
+    clusterName?: string;
+    clusterServer?: string;
 }
 
 export interface ResourceRef {
@@ -434,10 +489,18 @@ export interface ResourceNode extends ResourceRef {
     createdAt?: models.Time;
 }
 
-export interface ApplicationTree {
+export interface AbstractApplicationTree {
     nodes: ResourceNode[];
+}
+
+export interface ApplicationTree extends AbstractApplicationTree {
     orphanedNodes: ResourceNode[];
     hosts: Node[];
+}
+
+export interface ApplicationSetTree extends AbstractApplicationTree {
+    // FFU
+    dummyToPlacateLinter: any;
 }
 
 export interface ResourceID {
@@ -471,6 +534,7 @@ export interface ApplicationCondition {
 export interface ApplicationSummary {
     externalURLs?: string[];
     images?: string[];
+    isAppOfApps?: boolean;
 }
 
 export interface ApplicationStatus {
@@ -495,7 +559,9 @@ export interface HydrateOperation {
     finishedAt?: models.Time;
     phase: HydrateOperationPhase;
     message: string;
+    // drySHA is the sha of the DRY commit being hydrated. This will be empty if the operation is not successful.
     drySHA: string;
+    // hydratedSHA is the sha of the hydrated commit. This will be empty if the operation is not successful.
     hydratedSHA: string;
     sourceHydrator: SourceHydrator;
 }
@@ -546,9 +612,11 @@ export interface AuthSettings {
     };
     dexConfig: {
         connectors: {
+            id?: string;
             name: string;
             type: string;
         }[];
+        dexAuthConnectorID?: string;
     };
     oidcConfig: {
         name: string;
@@ -565,9 +633,18 @@ export interface AuthSettings {
     uiBannerURL: string;
     uiBannerPermanent: boolean;
     uiBannerPosition: string;
+    uiLoginButtonText: string;
     execEnabled: boolean;
     appsInAnyNamespaceEnabled: boolean;
     hydratorEnabled: boolean;
+    syncWithReplaceAllowed: boolean;
+    resourceViewEnabled: boolean;
+    appLabelKey: string;
+    trackingMethod: string;
+    additionalUrls: string[];
+    impersonationEnabled: boolean;
+    controllerNamespace: string;
+    installationID: string;
 }
 
 export interface UserInfo {
@@ -616,11 +693,16 @@ export interface Repository {
     noProxy?: string;
     insecure?: boolean;
     enableLfs?: boolean;
-    githubAppId?: string;
+    githubAppID?: string;
     forceHttpBasicAuth?: boolean;
     insecureOCIForceHttp?: boolean;
     enableOCI: boolean;
     useAzureWorkloadIdentity: boolean;
+    depth?: number;
+    azureServicePrincipalClientId?: string;
+    azureServicePrincipalClientSecret?: string;
+    azureServicePrincipalTenantId?: string;
+    azureActiveDirectoryEndpoint?: string;
 }
 
 export interface RepositoryList extends ItemsList<Repository> {}
@@ -629,6 +711,8 @@ export interface RepoCreds {
     url: string;
     username?: string;
     bearerToken?: string;
+    type?: string;
+    enableOCI?: boolean;
 }
 
 export interface RepoCredsList extends ItemsList<RepoCreds> {}
@@ -771,6 +855,7 @@ export interface Event {
     action: string;
     related: ObjectReference;
     reportingController: string;
+    reportingComponent: string;
     reportingInstance: string;
 }
 
@@ -794,6 +879,12 @@ export interface GroupKind {
     kind: string;
 }
 
+export interface ClusterResourceRestrictionItem {
+    group: string;
+    kind: string;
+    name?: string;
+}
+
 export interface ProjectSignatureKey {
     keyID: string;
 }
@@ -805,8 +896,8 @@ export interface ProjectSpec {
     destinationServiceAccounts: ApplicationDestinationServiceAccount[];
     description: string;
     roles: ProjectRole[];
-    clusterResourceWhitelist: GroupKind[];
-    clusterResourceBlacklist: GroupKind[];
+    clusterResourceWhitelist: ClusterResourceRestrictionItem[];
+    clusterResourceBlacklist: ClusterResourceRestrictionItem[];
     namespaceResourceBlacklist: GroupKind[];
     namespaceResourceWhitelist: GroupKind[];
     signatureKeys: ProjectSignatureKey[];
@@ -827,6 +918,7 @@ export interface SyncWindow {
     timeZone: string;
     andOperator: boolean;
     description: string;
+    syncOverrun: boolean;
 }
 
 export interface Project {
@@ -1100,10 +1192,7 @@ export interface ApplicationSetResource {
     labels?: {[key: string]: string};
 }
 
-export interface ApplicationSet {
-    apiVersion?: string;
-    kind?: string;
-    metadata: models.ObjectMeta;
+export interface ApplicationSet extends AbstractApplication {
     spec: ApplicationSetSpec;
     status?: {
         conditions?: ApplicationSetCondition[];
@@ -1116,5 +1205,6 @@ export interface ApplicationSet {
             targetRevisions?: string[];
         }>;
         resources?: ApplicationSetResource[];
+        resourcesCount?: number;
     };
 }
